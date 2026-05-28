@@ -1,241 +1,159 @@
-# ---------------------------------------------------
-# USER SERVICE LAYER
-# ---------------------------------------------------
-# This file contains the main business logic
-# related to users.
-#
-# Responsibilities:
-# - cache handling
-# - database queries
-# - observability tracing
-# - logging
-#
-# Routers/endpoints call functions from this file
-# instead of directly talking to database.
-#
-# This separation keeps application architecture
-# cleaner and easier to scale.
+import json
+import logging
 
-
+import redis as redis_lib
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.user_model import User
+from app.telemetry.tracing import meter, tracer
 
-from app.telemetry.tracing import tracer
+logger = logging.getLogger(__name__)
 
-from app.core.logging_config import logger
+# ---------------------------------------------------
+# REDIS CLIENT
+# ---------------------------------------------------
+
+redis_client = redis_lib.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+CACHE_KEY = "users"
+CACHE_TTL = 300  # seconds
+
+# ---------------------------------------------------
+# METRICS
+# ---------------------------------------------------
+
+cache_hits = meter.create_counter(
+    "cache.hits",
+    unit="1",
+    description="Number of times user list was served from Redis cache",
+)
+cache_misses = meter.create_counter(
+    "cache.misses",
+    unit="1",
+    description="Number of times Redis cache was empty and DB was queried",
+)
+db_queries = meter.create_counter(
+    "db.queries",
+    unit="1",
+    description="Number of database SELECT queries executed",
+)
+users_created = meter.create_counter(
+    "users.created",
+    unit="1",
+    description="Number of users created",
+)
+cache_size = meter.create_up_down_counter(
+    "cache.entries",
+    unit="1",
+    description="Current number of entries held in Redis cache",
+)
 
 
 # ---------------------------------------------------
-# IN-MEMORY CACHE
+# CACHE HELPERS
 # ---------------------------------------------------
-# Simple temporary cache stored in memory.
-#
-# Used to avoid repeated database queries
-# for frequently accessed user data.
-#
-# Real production systems usually use:
-# - Redis
-# - Memcached
-# - distributed caching systems
 
+async def check_cache() -> list[str] | None:
+    with tracer.start_as_current_span("cache.check") as span:
+        try:
+            raw = redis_client.get(CACHE_KEY)
+        except redis_lib.RedisError as exc:
+            logger.warning("Redis unavailable during cache check: %s", exc)
+            span.set_attribute("cache.error", str(exc))
+            return None
 
-cache_store = {}
-
-
-# ---------------------------------------------------
-# CACHE CHECK
-# ---------------------------------------------------
-# Checks whether users data already exists
-# inside cache memory.
-#
-# Cache hit:
-# data found in memory
-#
-# Cache miss:
-# data not found → query database
-
-
-async def check_cache():
-
-    with tracer.start_as_current_span(
-        "cache-check"
-    ) as span:
-
-        users = cache_store.get("users")
-
-        # cache hit
-        if users:
-
-            span.set_attribute(
-                "cache.hit",
-                True
-            )
-
+        if raw:
+            users = json.loads(raw)
+            span.set_attribute("cache.hit", True)
+            span.set_attribute("cache.key", CACHE_KEY)
             span.add_event("Cache HIT")
-
-            logger.info(
-                "Cache HIT for users"
-            )
-
+            cache_hits.add(1, {"cache.key": CACHE_KEY})
+            logger.info("Cache HIT for key=%s count=%d", CACHE_KEY, len(users))
             return users
 
-        # cache miss
-        span.set_attribute(
-            "cache.hit",
-            False
-        )
-
+        span.set_attribute("cache.hit", False)
+        span.set_attribute("cache.key", CACHE_KEY)
         span.add_event("Cache MISS")
-
-        logger.info(
-            "Cache MISS for users"
-        )
-
+        cache_misses.add(1, {"cache.key": CACHE_KEY})
+        logger.info("Cache MISS for key=%s", CACHE_KEY)
         return None
 
 
-# ---------------------------------------------------
-# DATABASE QUERY
-# ---------------------------------------------------
-# Fetches users from PostgreSQL database.
-#
-# OpenTelemetry span attributes provide
-# metadata about:
-# - database type
-# - operation type
-# - table being queried
-#
-# This helps observability platforms
-# understand database behavior.
+async def write_cache(users: list[str]) -> None:
+    with tracer.start_as_current_span("cache.write") as span:
+        try:
+            redis_client.setex(CACHE_KEY, CACHE_TTL, json.dumps(users))
+            span.set_attribute("cache.key", CACHE_KEY)
+            span.set_attribute("cache.ttl", CACHE_TTL)
+            cache_size.add(1)
+        except redis_lib.RedisError as exc:
+            logger.warning("Redis unavailable during cache write: %s", exc)
+            span.set_attribute("cache.error", str(exc))
 
 
-async def query_database(
-    db: Session
-):
-
-    with tracer.start_as_current_span(
-        "database-query"
-    ) as span:
-
-        span.set_attribute(
-            "db.system",
-            "postgresql"
-        )
-
-        span.set_attribute(
-            "db.operation",
-            "SELECT"
-        )
-
-        span.set_attribute(
-            "db.table",
-            "users"
-        )
-
-        logger.info(
-            "Executing users database query"
-        )
-
-        users = db.query(User).all()
-
-        return [
-
-            user.name
-
-            for user in users
-        ]
+async def invalidate_cache() -> None:
+    with tracer.start_as_current_span("cache.invalidate") as span:
+        try:
+            redis_client.delete(CACHE_KEY)
+            span.set_attribute("cache.key", CACHE_KEY)
+            cache_size.add(-1)
+            logger.info("Cache invalidated for key=%s", CACHE_KEY)
+        except redis_lib.RedisError as exc:
+            logger.warning("Redis unavailable during cache invalidate: %s", exc)
+            span.set_attribute("cache.error", str(exc))
 
 
 # ---------------------------------------------------
-# FETCH USERS
+# DATABASE HELPERS
 # ---------------------------------------------------
-# Main user fetching workflow.
-#
-# Flow:
-# 1. check cache
-# 2. if cache hit → return cached data
-# 3. if cache miss → query database
-# 4. store database result in cache
+
+async def query_database(db: Session) -> list[str]:
+    with tracer.start_as_current_span("db.query.users") as span:
+        span.set_attribute("db.system", "postgresql")
+        span.set_attribute("db.operation", "SELECT")
+        span.set_attribute("db.sql.table", "users")
+
+        logger.info("Executing SELECT on users table")
+        db_queries.add(1, {"db.operation": "SELECT", "db.table": "users"})
+
+        rows = db.query(User).all()
+        names = [u.name for u in rows]
+
+        span.set_attribute("db.rows_returned", len(names))
+        return names
 
 
-async def fetch_users(
-    db: Session
-):
+# ---------------------------------------------------
+# SERVICE FUNCTIONS
+# ---------------------------------------------------
 
-    # check cache first
-    cached_users = await check_cache()
+async def fetch_users(db: Session) -> list[str]:
+    cached = await check_cache()
+    if cached is not None:
+        return cached
 
-    # cache hit
-    if cached_users:
-
-        return cached_users
-
-    # cache miss
     users = await query_database(db)
-
-    # save users into cache
-    cache_store["users"] = users
-
+    await write_cache(users)
     return users
 
 
-# ---------------------------------------------------
-# CREATE USER
-# ---------------------------------------------------
-# Creates new user inside database.
-#
-# Also clears cache after insertion
-# so future requests fetch fresh data
-# instead of outdated cached users.
+async def create_new_user(name: str, db: Session) -> dict:
+    with tracer.start_as_current_span("user.create") as span:
+        span.set_attribute("user.name", name)
 
+        with tracer.start_as_current_span("db.insert.user") as db_span:
+            db_span.set_attribute("db.system", "postgresql")
+            db_span.set_attribute("db.operation", "INSERT")
+            db_span.set_attribute("db.sql.table", "users")
 
-async def create_new_user(
-    name: str,
-    db: Session
-):
-
-    with tracer.start_as_current_span(
-        "create-user"
-    ):
-
-        # trace database insert operation
-        with tracer.start_as_current_span(
-            "database-insert"
-        ) as span:
-
-            span.set_attribute(
-                "db.system",
-                "postgresql"
-            )
-
-            span.set_attribute(
-                "db.operation",
-                "INSERT"
-            )
-
-            span.set_attribute(
-                "db.table",
-                "users"
-            )
-
-            logger.info(
-                f"Creating new user: {name}"
-            )
+            logger.info("Creating new user: %s", name)
+            db_queries.add(1, {"db.operation": "INSERT", "db.table": "users"})
 
             new_user = User(name=name)
-
             db.add(new_user)
-
             db.commit()
 
-        # clear cache after insertion
-        cache_store.clear()
+        users_created.add(1)
+        await invalidate_cache()
 
-        return {
-
-            "message": (
-                f"{name} added successfully"
-            )
-
-        }
+        return {"message": f"{name} added successfully"}

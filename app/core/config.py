@@ -46,6 +46,14 @@ class Settings:
     )
 
 
+    # Redis connection URL
+    REDIS_URL = os.getenv(
+
+        "REDIS_URL",
+
+        "redis://localhost:6379/0"
+    )
+
     # Niriksha AI API key used for
     # observability authentication
     NIRIKSHA_API_KEY = os.getenv(

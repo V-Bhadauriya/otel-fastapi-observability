@@ -1,133 +1,49 @@
-# ---------------------------------------------------
-# CORE APPLICATION SETUP
-# ---------------------------------------------------
-# This file contains reusable setup functions
-# used during FastAPI application startup.
-#
-# Instead of dumping everything inside main.py,
-# we separate:
-# - route registration
-# - telemetry instrumentation
-# - exception handling
-#
-# This keeps the application architecture cleaner
-# and easier to scale later.
+import logging
 
-
-from fastapi import FastAPI
-from fastapi import Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.instrumentation.psycopg2 import Psycopg2Instrumentor
+from opentelemetry.instrumentation.redis import RedisInstrumentor
+from opentelemetry.instrumentation.requests import RequestsInstrumentor
+from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 
-# custom application exceptions
-from app.core.exceptions import (
-    UserNotFoundException
-)
+from app.api.health import router as health_router
+from app.api.products import router as product_router
+from app.api.users import router as user_router
+from app.core.exceptions import UserNotFoundException
+from app.db.database import engine
 
-
-# API routers
-from app.api.users import (
-    router as user_router
-)
-
-from app.api.products import (
-    router as product_router
-)
-
-from app.api.health import (
-    router as health_router
-)
+logger = logging.getLogger(__name__)
 
 
-# OpenTelemetry instrumentation
-from opentelemetry.instrumentation.fastapi import (
-    FastAPIInstrumentor
-)
-
-from opentelemetry.instrumentation.requests import (
-    RequestsInstrumentor
-)
-
-
-# ---------------------------------------------------
-# REGISTER ROUTES
-# ---------------------------------------------------
-# Centralized router registration.
-#
-# All API endpoints are connected to the app here.
-#
-# This becomes useful later when application grows
-# and new modules like:
-# - payments
-# - authentication
-# - inventory
-# - analytics
-# are added.
-
-
-def register_routes(app: FastAPI):
-
+def register_routes(app: FastAPI) -> None:
     app.include_router(user_router)
-
     app.include_router(product_router)
-
     app.include_router(health_router)
 
 
-# ---------------------------------------------------
-# SETUP INSTRUMENTATION
-# ---------------------------------------------------
-# Automatically instruments:
-# - FastAPI incoming requests
-# - outgoing HTTP requests
-#
-# This allows observability tools like:
-# - OpenTelemetry
-# - Niriksha AI
-# to automatically collect traces/spans
-# without manually tracing every request.
-
-
-def setup_instrumentation(app: FastAPI):
-
-    # traces incoming FastAPI requests
+def setup_instrumentation(app: FastAPI) -> None:
+    # HTTP framework — traces every incoming request automatically
     FastAPIInstrumentor.instrument_app(app)
 
-    # traces outgoing HTTP requests
+    # Outgoing HTTP calls (requests library)
     RequestsInstrumentor().instrument()
 
+    # SQLAlchemy — traces every query with db.statement, db.operation
+    SQLAlchemyInstrumentor().instrument(engine=engine, enable_commenter=True)
 
-# ---------------------------------------------------
-# EXCEPTION HANDLERS
-# ---------------------------------------------------
-# Converts application exceptions into
-# structured API responses.
-#
-# Instead of crashing application or returning
-# ugly errors, we return controlled JSON responses.
+    # psycopg2 — low-level PostgreSQL driver spans
+    Psycopg2Instrumentor().instrument()
+
+    # Redis — traces every get/set/del with db.statement
+    RedisInstrumentor().instrument()
+
+    logger.info("All instrumentors active: FastAPI, Requests, SQLAlchemy, psycopg2, Redis")
 
 
-def setup_exception_handlers(app: FastAPI):
-
-    @app.exception_handler(
-        UserNotFoundException
-    )
-
-    async def user_not_found_handler(
-
-        request: Request,
-
-        exc: UserNotFoundException
-
-    ):
-
-        return JSONResponse(
-
-            status_code=404,
-
-            content={
-
-                "error": exc.message
-
-            }
-        )
+def setup_exception_handlers(app: FastAPI) -> None:
+    @app.exception_handler(UserNotFoundException)
+    async def user_not_found_handler(request: Request, exc: UserNotFoundException):
+        return JSONResponse(status_code=404, content={"error": exc.message})

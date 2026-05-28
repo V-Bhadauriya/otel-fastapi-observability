@@ -1,25 +1,14 @@
 from fastapi import APIRouter
+from opentelemetry import trace
 
+router = APIRouter(prefix="/api/v1", tags=["Products"])
+tracer = trace.get_tracer(__name__)
 
-# router object
-router = APIRouter(prefix="/api/v1",tags=["Products"])  #now  url becomes /api/v1/users
+PRODUCTS = ["Laptop", "Phone", "Keyboard"]
 
-
-# -----------------------------
-# PRODUCTS ENDPOINT
-# -----------------------------
 
 @router.get("/products")
 def get_products():
-
-    return {
-
-        "products": [
-
-            "Laptop",
-            "Phone",
-            "Keyboard"
-
-        ]
-
-    }
+    with tracer.start_as_current_span("products.list") as span:
+        span.set_attribute("products.count", len(PRODUCTS))
+        return {"products": PRODUCTS}
