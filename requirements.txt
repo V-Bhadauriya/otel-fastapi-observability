@@ -1,0 +1,15 @@
+fastapi>=0.111
+uvicorn[standard]>=0.29
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+python-dotenv>=1.0
+
+# Niriksha AI SDK (wraps OpenTelemetry, gRPC transport)
+nirikshaai[all]>=0.0.1
+
+# Raw OpenTelemetry — used for http-direct, grpc-collector, http-collector modes
+opentelemetry-sdk>=1.24
+opentelemetry-exporter-otlp-proto-grpc>=1.24
+opentelemetry-exporter-otlp-proto-http>=1.24
+opentelemetry-instrumentation-fastapi>=0.45b0
+opentelemetry-instrumentation-requests>=0.45b0

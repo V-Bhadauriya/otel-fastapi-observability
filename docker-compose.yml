@@ -1,0 +1,72 @@
+services:
+
+  # ------------------------------------------------------------------
+  # PostgreSQL database
+  # ------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: appdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ------------------------------------------------------------------
+  # OTel Collector
+  # Only started when --profile collector is passed.
+  #
+  # Use with:
+  #   TELEMETRY_MODE=grpc-collector docker compose --profile collector up
+  #   TELEMETRY_MODE=http-collector docker compose --profile collector up
+  # ------------------------------------------------------------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.102.0
+    profiles: ["collector"]
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./collector/otel-collector-config.yaml:/etc/otel/config.yaml:ro
+    environment:
+      NIRIKSHA_API_KEY: ${NIRIKSHA_API_KEY}
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ------------------------------------------------------------------
+  # FastAPI application
+  #
+  # Set TELEMETRY_MODE in .env or via environment to choose transport:
+  #
+  #   grpc-direct    (default) — SDK gRPC direct to Niriksha AI
+  #   http-direct              — OTLP HTTP direct to Niriksha AI
+  #   grpc-collector           — OTLP gRPC → OTel Collector
+  #   http-collector           — OTLP HTTP → OTel Collector
+  # ------------------------------------------------------------------
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/appdb
+      OTEL_COLLECTOR_GRPC_ENDPOINT: otel-collector:4317
+      OTEL_COLLECTOR_HTTP_ENDPOINT: http://otel-collector:4318
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

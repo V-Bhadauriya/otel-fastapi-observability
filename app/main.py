@@ -11,8 +11,11 @@
 # - start FastAPI application
 
 
+import logging
+
 from fastapi import FastAPI
 
+from app.core.config import settings
 
 # observability/tracing setup
 from app.telemetry.tracing import (
@@ -54,6 +57,11 @@ app = FastAPI()
 
 
 setup_tracing()
+
+logging.basicConfig(level=logging.INFO)
+logging.getLogger(__name__).info(
+    "Telemetry active — mode: %s", settings.TELEMETRY_MODE
+)
 
 
 # ---------------------------------------------------

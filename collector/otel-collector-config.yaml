@@ -1,0 +1,49 @@
+# OTel Collector configuration
+#
+# Receives telemetry from the app on both gRPC (4317) and HTTP (4318).
+# Forwards everything to Niriksha AI via OTLP gRPC.
+#
+# NIRIKSHA_API_KEY must be set in the environment before starting
+# the collector (injected by docker-compose).
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: "0.0.0.0:4317"
+      http:
+        endpoint: "0.0.0.0:4318"
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  otlp:
+    endpoint: "grpc-ingest.niriksha.ai:443"
+    headers:
+      "X-API-Key": "${NIRIKSHA_API_KEY}"
+    tls:
+      insecure: false
+
+  # Optional: log spans to stdout for local debugging
+  debug:
+    verbosity: normal
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp, debug]
+
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp]
+
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp]
