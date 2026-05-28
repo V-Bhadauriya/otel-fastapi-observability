@@ -1,0 +1,45 @@
+# OTel Collector — HTTP export to Niriksha AI
+#
+# Receives on gRPC (:4317) and HTTP (:4318).
+# Forwards to Niriksha AI via OTLP HTTP only.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: "0.0.0.0:4317"
+      http:
+        endpoint: "0.0.0.0:4318"
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  otlphttp:
+    endpoint: "https://ingest.niriksha.ai"
+    headers:
+      "X-API-Key": "${NIRIKSHA_API_KEY}"
+    tls:
+      insecure: false
+
+  debug:
+    verbosity: normal
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp, debug]
+
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp]
+
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp]

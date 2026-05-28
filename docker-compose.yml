@@ -23,16 +23,25 @@ services:
   # OTel Collector
   # Only started when --profile collector is passed.
   #
-  # Use with:
-  #   TELEMETRY_MODE=grpc-collector docker compose --profile collector up
-  #   TELEMETRY_MODE=http-collector docker compose --profile collector up
+  # COLLECTOR_EXPORTER controls which protocol the collector uses
+  # to forward data to Niriksha AI:
+  #
+  #   grpc (default) — collector/otel-collector-config-grpc.yaml
+  #   http           — collector/otel-collector-config-http.yaml
+  #
+  # Examples:
+  #   TELEMETRY_MODE=grpc-collector COLLECTOR_EXPORTER=grpc \
+  #     docker compose --profile collector up
+  #
+  #   TELEMETRY_MODE=http-collector COLLECTOR_EXPORTER=http \
+  #     docker compose --profile collector up
   # ------------------------------------------------------------------
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.102.0
     profiles: ["collector"]
     command: ["--config=/etc/otel/config.yaml"]
     volumes:
-      - ./collector/otel-collector-config.yaml:/etc/otel/config.yaml:ro
+      - ./collector/otel-collector-config-${COLLECTOR_EXPORTER:-grpc}.yaml:/etc/otel/config.yaml:ro
     environment:
       NIRIKSHA_API_KEY: ${NIRIKSHA_API_KEY}
     ports:
