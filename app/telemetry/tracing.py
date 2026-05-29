@@ -42,6 +42,9 @@ def _make_resource() -> Resource:
         SERVICE_NAME: "otel-fastapi-service",
         "deployment.environment": settings.APP_ENV,
         "service.version": "1.0.0",
+        "telemetry.sdk.name": "nirikshaai-python",
+        "telemetry.sdk.version": "0.0.1",
+        "telemetry.sdk.language": "python",
     })
 
 
