@@ -11,6 +11,7 @@
 # - start FastAPI application
 
 
+import asyncio
 import logging
 
 # Console handler must be registered BEFORE setup_tracing() attaches the
@@ -26,22 +27,9 @@ from app.core.config import settings
 from app.db.database import engine, Base
 import app.models.user_model  # noqa: F401 — registers model with Base
 
-# observability/tracing setup
-from app.telemetry.tracing import (
-
-    setup_tracing
-)
-
-
-# reusable application setup functions
-from app.core.setup import (
-
-    register_routes,
-
-    setup_instrumentation,
-
-    setup_exception_handlers
-)
+from app.telemetry.tracing import setup_tracing
+from app.telemetry.generator import run_generator
+from app.core.setup import register_routes, setup_instrumentation, setup_exception_handlers
 
 
 # ---------------------------------------------------
@@ -53,9 +41,20 @@ from app.core.setup import (
 app = FastAPI()
 
 
+_generator_task: asyncio.Task | None = None
+
+
 @app.on_event("startup")
-def create_tables():
+async def startup():
     Base.metadata.create_all(bind=engine)
+    global _generator_task
+    _generator_task = asyncio.create_task(run_generator())
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    if _generator_task:
+        _generator_task.cancel()
 
 
 # ---------------------------------------------------
