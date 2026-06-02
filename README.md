@@ -106,6 +106,24 @@ uvicorn examples.http_via_collector:app --port 8004
 
 ---
 
+## Continuous Telemetry Generator
+
+The app runs a background task (`app/telemetry/generator.py`) that emits
+synthetic telemetry every 10 seconds regardless of real HTTP traffic.
+This ensures Niriksha AI always has fresh data to display.
+
+Signals emitted per cycle:
+- **Traces** — simulated cache checks, DB queries, HTTP request spans
+- **Metrics** — request counters, latency histograms, error rates, active-user gauge
+- **Logs** — INFO / WARNING / ERROR entries correlated to active spans
+
+To watch it live:
+```bash
+docker compose logs -f app | grep "Generator cycle"
+```
+
+---
+
 ## OTel Collector
 
 The collector config lives at `collector/otel-collector-config.yaml`.
@@ -121,6 +139,34 @@ docker compose --profile collector logs -f otel-collector
 ```
 
 Look for `"Everything is ready"` on startup and span export confirmations.
+
+---
+
+## gRPC-Direct Mode — Infrastructure Requirements
+
+`grpc-direct` sends OTLP gRPC over TLS directly to `grpc-ingest.niriksha.ai:443`.
+This requires the Niriksha platform to be running a correctly configured nginx
+ingress in front of the gateway. If you are operating the Niriksha platform
+yourself, the ingress must satisfy these constraints:
+
+| Requirement | Why |
+|---|---|
+| `nginx.ingress.kubernetes.io/backend-protocol: GRPC` | Makes nginx use `grpc_pass` instead of `proxy_pass`, enabling proper HTTP/2 framing |
+| Single catch-all path `/ Prefix` | gRPC methods use arbitrary paths; per-method path rules miss most RPC calls |
+| TLS termination at nginx (not at the gateway) | gRPC clients send a direct HTTP/2 preface; Cloudflare Tunnel's H2C upgrade mechanism is incompatible — TLS must terminate at nginx so it can negotiate HTTP/2 via ALPN |
+| `ssl-redirect: "true"` | Forces the gRPC client to the TLS listener |
+
+Minimal working ingress annotation set:
+```yaml
+nginx.ingress.kubernetes.io/backend-protocol: GRPC
+nginx.ingress.kubernetes.io/ssl-redirect: "true"
+nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+```
+
+The Python OTLP gRPC exporter sends `x-api-key` as per-call gRPC metadata.
+nginx forwards it to the upstream via `grpc_pass_request_headers on` (the default).
+No custom header configuration is needed on the ingress side.
 
 ---
 

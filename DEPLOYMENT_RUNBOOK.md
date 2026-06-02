@@ -237,3 +237,125 @@ lsof -i :4318
 docker compose --profile collector down -v --remove-orphans
 docker system prune -f
 ```
+
+---
+
+## Verifying gRPC-Direct End-to-End
+
+Use these commands to confirm data is flowing all the way from the app
+through the Niriksha gRPC ingest pipeline.
+
+### 1. Confirm the app is in gRPC-direct mode
+```bash
+docker compose logs app | grep "Telemetry active"
+# Expected: Telemetry active — mode: grpc-direct
+```
+
+### 2. Probe the gRPC ingest endpoint
+```bash
+grpcurl grpc-ingest.niriksha.ai:443 grpc.health.v1.Health/Check
+# Expected: Unimplemented (health service not registered) — confirms TLS+gRPC works
+```
+
+### 3. Send a test OTLP trace export with your API key
+```bash
+echo '{"resourceSpans":[]}' | grpcurl -d @ \
+  -H "x-api-key: $NIRIKSHA_API_KEY" \
+  grpc-ingest.niriksha.ai:443 \
+  opentelemetry.proto.collector.trace.v1.TraceService/Export
+# Expected: {} — auth passed, empty batch accepted
+```
+
+If this returns `{}` with no error, your API key is valid and the gRPC
+transport is working correctly. If you see `Code: Unauthenticated`, check the
+key value in `.env`.
+
+### 4. Confirm data reaches Niriksha (gateway logs are silent on success)
+
+The gateway only logs `WARN` on auth failures — silence means success. To
+verify data is flowing into the pipeline, check whether the NATS JetStream
+`TELEMETRY` stream sequence number is advancing:
+
+```bash
+# Run twice 30 seconds apart — last_seq should increase
+kubectl exec -n niriksha-saas nats-0 -c nats -- \
+  wget -qO- "http://localhost:8222/jsz?streams=1" | \
+  python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+st = d['account_details'][0]['stream_detail'][0]['state']
+print(f\"last_seq={st['last_seq']}  messages_pending={st['messages']}\")
+"
+```
+
+`last_seq` advancing + `messages_pending=0` means the processor is consuming
+messages as fast as they arrive (healthy state).
+
+---
+
+## gRPC-Direct Infrastructure Notes
+
+These notes document the Niriksha platform-side configuration required for
+`grpc-direct` mode to work. Relevant when operating your own Niriksha instance.
+
+### Why nginx must terminate TLS (not the gateway)
+
+Cloudflare Tunnel's H2C (`h2c://`) scheme uses the HTTP/1.1 Upgrade mechanism
+to negotiate HTTP/2 cleartext. gRPC servers send a direct HTTP/2 connection
+preface (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`) without the upgrade handshake —
+these are incompatible. Routing Cloudflare directly to the gRPC gateway
+produces:
+
+```
+net/http: HTTP/1.x transport connection broken: malformed HTTP response
+"\x00\x00\x06\x04..."
+```
+
+The fix is to route Cloudflare → `https://ingress-nginx` so nginx terminates
+TLS and negotiates HTTP/2 via ALPN, then uses `grpc_pass` to the upstream.
+
+### nginx ingress configuration
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nirikshaai-saas-ingest-grpc
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: GRPC
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: 50m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: grpc-ingest.niriksha.ai
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: nirikshaai-saas-gateway
+            port:
+              number: 4317
+  tls:
+  - hosts:
+    - grpc-ingest.niriksha.ai
+```
+
+The path must be `/` with `Prefix` — per-method paths miss most gRPC calls
+because the OTel exporter uses paths like
+`/opentelemetry.proto.collector.trace.v1.TraceService/Export`.
+
+### Header forwarding
+
+nginx-ingress with `backend-protocol: GRPC` enables `grpc_pass_request_headers on`
+by default, which forwards all incoming gRPC metadata (including `x-api-key`)
+to the upstream gateway unchanged. No annotation snippets are needed.
+
+Note: if your nginx-ingress version has snippet annotations disabled
+(`--allow-snippet-annotations` not set), `configuration-snippet` annotations
+will be rejected. The default `grpc_pass_request_headers on` behavior is
+sufficient and does not require snippets.
